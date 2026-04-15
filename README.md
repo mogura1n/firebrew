@@ -27,13 +27,13 @@ Self-maintained [Homebrew](https://brew.sh/) repository.
 To add this tap to your Homebrew installation:
 
 ```bash
-brew tap navialliance/firebrew https://github.com/navialliance/firebrew
+brew tap mogura1n/firebrew https://github.com/mogura1n/firebrew
 ```
 
 ### App Installation
 #### Formula
 ```
-brew install navialliance/firebrew/appname
+brew install mogura1n/firebrew/appname
 ```
 or
 ```
@@ -56,5 +56,5 @@ brew install --cask appname
 
 To remove this tap from your Homebrew installation:
 ```bash
-brew untap navialliance/firebrew
+brew untap mogura1n/firebrew
 ```
