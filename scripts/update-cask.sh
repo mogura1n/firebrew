@@ -22,10 +22,18 @@ fi
 #############################################
 
 github_api() {
-  curl -fsSL \
-    -H "Accept: application/vnd.github+json" \
-    ${GH_PAT:+-H "Authorization: Bearer $GH_PAT"} \
-    "$1"
+  local url="$1"
+
+  if [ -n "${GH_PAT:-}" ]; then
+    curl -fsSL \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $GH_PAT" \
+      "$url"
+  else
+    curl -fsSL \
+      -H "Accept: application/vnd.github+json" \
+      "$url"
+  fi
 }
 
 get_filename() {
