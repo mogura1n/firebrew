@@ -17,6 +17,8 @@ if [ ! -f "$CASK_PATH" ]; then
   exit 0
 fi
 
+echo "GH_PAT present: $([ -n "${GH_PAT:-}" ] && echo yes || echo no)"
+
 #############################################
 # Helpers
 #############################################
