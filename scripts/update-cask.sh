@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 CASK_PATH="$1"
 REPO="$2"
@@ -17,99 +17,233 @@ if [ ! -f "$CASK_PATH" ]; then
   exit 0
 fi
 
+#############################################
+# Helpers
+#############################################
+
+github_api() {
+  curl -fsSL \
+    -H "Accept: application/vnd.github+json" \
+    ${GH_PAT:+-H "Authorization: Bearer $GH_PAT"} \
+    "$1"
+}
+
+get_filename() {
+  basename "$1"
+}
+
+cleanup() {
+  rm -rf "${TEMP_DIR:-}"
+  rm -f "$CASK_PATH.bak"
+}
+
+trap cleanup EXIT
+
+#############################################
 # Fetch releases
-RELEASES_DATA=$(curl -s -H "Authorization: token $GH_PAT" "https://api.github.com/repos/$REPO/releases")
+#############################################
+
+echo "Fetching releases from $REPO..."
+
+RELEASES_DATA=$(github_api "https://api.github.com/repos/$REPO/releases")
+
+# Ensure GitHub returned an array
+if ! echo "$RELEASES_DATA" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "❌ Invalid GitHub API response"
+  echo "$RELEASES_DATA"
+  exit 1
+fi
+
+#############################################
+# Get latest tag
+#############################################
 
 get_latest_tag() {
   local json="$1"
   local include_pre="$2"
-  if command -v jq >/dev/null 2>&1; then
-    if [ "$include_pre" = "true" ]; then
-      echo "$json" | jq -r '.[0].tag_name'
-    else
-      echo "$json" | jq -r '[.[] | select(.prerelease == false)][0].tag_name'
-    fi
+
+  if [ "$include_pre" = "true" ]; then
+    echo "$json" | jq -r '.[0].tag_name'
   else
-    echo "$json" | grep -m 1 '"tag_name":' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/'
+    echo "$json" | jq -r '
+      [.[] | select(.prerelease == false)][0].tag_name
+    '
   fi
 }
 
 LATEST_TAG=$(get_latest_tag "$RELEASES_DATA" "$INCLUDE_PRERELEASE")
+
+if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+  echo "❌ Could not determine latest release tag"
+  exit 1
+fi
+
 LATEST_VERSION=$(echo "$LATEST_TAG" | sed -E 's/^(v|release-|build-)//')
 
-CURRENT_VERSION=$(grep -oP 'version ["'"'"']\K[^"'"'"']+' "$CASK_PATH" || echo "not-found")
+#############################################
+# Current version check
+#############################################
+
+CURRENT_VERSION=$(
+  grep -oP 'version ["'"'"']\K[^"'"'"']+' "$CASK_PATH" \
+  || echo "not-found"
+)
+
 if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
   echo "$APP_NAME is already up to date."
   exit 0
 fi
 
-echo "Updating $APP_NAME to version $LATEST_VERSION..."
+echo "Updating $APP_NAME:"
+echo "  Current: $CURRENT_VERSION"
+echo "  Latest : $LATEST_VERSION"
 
+#############################################
 # Update version
-sed -i.bak -E "s/version [\"'].*[\"']/version \"$LATEST_VERSION\"/" "$CASK_PATH"
+#############################################
 
+sed -i.bak -E \
+  "s/version [\"'].*[\"']/version \"$LATEST_VERSION\"/" \
+  "$CASK_PATH"
+
+#############################################
 # SHA256 Handling
-TEMP_DIR=$(mktemp -d)
-get_filename() { echo "$1" | sed -E 's|.*/([^/]+)$|\1|'; }
+#############################################
 
-# Check if SHA_TYPE is none and if the cask has :no_check
+TEMP_DIR=$(mktemp -d)
+
+# Detect existing no_check
 IS_NO_CHECK=$(grep -c "sha256 :no_check" "$CASK_PATH" || true)
 
 if [ "$SHA_TYPE" = "none" ]; then
-  echo "Preserving existing SHA configuration as 'none' was specified."
-  # If no_check doesn't exist but SHA_TYPE is none, we should add it
+  echo "Using sha256 :no_check"
+
   if [ "$IS_NO_CHECK" -eq 0 ]; then
     sed -i.bak -E "/^  version/ a\\
   sha256 :no_check
 " "$CASK_PATH"
   fi
+
 else
-  # Remove any existing sha256 (handles :no_check, single, and multi-arch)
+  # Remove existing sha256 entries
   sed -i.bak '/^\s*sha256 /d' "$CASK_PATH"
 
-  if [ "$SHA_TYPE" = "dual" ]; then
-    ARM_URL=$(echo "$RELEASES_DATA" | jq -r --arg TAG "$LATEST_TAG" '[.[] | select(.tag_name == $TAG)][0].assets[] | select(.name | test("arm|arm64")) | .browser_download_url' | head -1)
-    INTEL_URL=$(echo "$RELEASES_DATA" | jq -r --arg TAG "$LATEST_TAG" '[.[] | select(.tag_name == $TAG)][0].assets[] | select(.name | test("intel|x86_64|amd64")) | .browser_download_url' | head -1)
+  ###########################################
+  # Dual architecture
+  ###########################################
 
-    if [ -z "$ARM_URL" ] || [ -z "$INTEL_URL" ]; then
-      echo "❌ ARM or Intel asset not found for $APP_NAME"
-      rm -rf "$TEMP_DIR"
+  if [ "$SHA_TYPE" = "dual" ]; then
+
+    ARM_URL=$(
+      echo "$RELEASES_DATA" | jq -r \
+        --arg TAG "$LATEST_TAG" '
+        [.[] | select(.tag_name == $TAG)][0]
+        .assets[]
+        | select(.name | test("arm|arm64"; "i"))
+        | .browser_download_url
+      ' | head -1
+    )
+
+    INTEL_URL=$(
+      echo "$RELEASES_DATA" | jq -r \
+        --arg TAG "$LATEST_TAG" '
+        [.[] | select(.tag_name == $TAG)][0]
+        .assets[]
+        | select(.name | test("intel|x86_64|amd64"; "i"))
+        | .browser_download_url
+      ' | head -1
+    )
+
+    if [ -z "$ARM_URL" ] || [ "$ARM_URL" = "null" ]; then
+      echo "❌ ARM asset not found"
+      exit 1
+    fi
+
+    if [ -z "$INTEL_URL" ] || [ "$INTEL_URL" = "null" ]; then
+      echo "❌ Intel asset not found"
       exit 1
     fi
 
     ARM_FILE="$TEMP_DIR/$(get_filename "$ARM_URL")"
     INTEL_FILE="$TEMP_DIR/$(get_filename "$INTEL_URL")"
 
-    curl -L "$ARM_URL" -o "$ARM_FILE"
-    curl -L "$INTEL_URL" -o "$INTEL_FILE"
+    echo "Downloading ARM asset..."
+    curl -fL "$ARM_URL" -o "$ARM_FILE"
 
-    ARM_SHA256=$(shasum -a 256 "$ARM_FILE" | awk '{ print $1 }')
-    INTEL_SHA256=$(shasum -a 256 "$INTEL_FILE" | awk '{ print $1 }')
+    echo "Downloading Intel asset..."
+    curl -fL "$INTEL_URL" -o "$INTEL_FILE"
+
+    ARM_SHA256=$(shasum -a 256 "$ARM_FILE" | awk '{print $1}')
+    INTEL_SHA256=$(shasum -a 256 "$INTEL_FILE" | awk '{print $1}')
 
     sed -i.bak -E "/^  version/ a\\
   sha256 arm:   \"$ARM_SHA256\",\\
          intel: \"$INTEL_SHA256\"
 " "$CASK_PATH"
 
+  ###########################################
+  # Single asset
+  ###########################################
+
   elif [ "$SHA_TYPE" = "single" ]; then
-    UNIVERSAL_URL=$(echo "$RELEASES_DATA" | jq -r --arg TAG "$LATEST_TAG" '[.[] | select(.tag_name == $TAG)][0].assets[0].browser_download_url')
+
+    # Prefer macOS tarball if available
+    UNIVERSAL_URL=$(
+      echo "$RELEASES_DATA" | jq -r \
+        --arg TAG "$LATEST_TAG" '
+        [.[] | select(.tag_name == $TAG)][0]
+        .assets[]
+        | select(.name | test("macos.*(tar\\.xz|zip|dmg|pkg)$"; "i"))
+        | .browser_download_url
+      ' | head -1
+    )
+
+    # Fallback to first asset
+    if [ -z "$UNIVERSAL_URL" ] || [ "$UNIVERSAL_URL" = "null" ]; then
+      UNIVERSAL_URL=$(
+        echo "$RELEASES_DATA" | jq -r \
+          --arg TAG "$LATEST_TAG" '
+          [.[] | select(.tag_name == $TAG)][0]
+          .assets[0]
+          .browser_download_url
+        '
+      )
+    fi
+
+    if [ -z "$UNIVERSAL_URL" ] || [ "$UNIVERSAL_URL" = "null" ]; then
+      echo "❌ Could not determine download URL"
+      exit 1
+    fi
+
     UNIVERSAL_FILE="$TEMP_DIR/$(get_filename "$UNIVERSAL_URL")"
-    curl -L "$UNIVERSAL_URL" -o "$UNIVERSAL_FILE"
-    UNIVERSAL_SHA256=$(shasum -a 256 "$UNIVERSAL_FILE" | awk '{ print $1 }')
+
+    echo "Downloading asset..."
+    curl -fL "$UNIVERSAL_URL" -o "$UNIVERSAL_FILE"
+
+    UNIVERSAL_SHA256=$(shasum -a 256 "$UNIVERSAL_FILE" | awk '{print $1}')
 
     sed -i.bak -E "/^  version/ a\\
   sha256 \"$UNIVERSAL_SHA256\"
 " "$CASK_PATH"
+
+  else
+    echo "❌ Unknown SHA_TYPE: $SHA_TYPE"
+    exit 1
   fi
 fi
 
-rm -rf "$TEMP_DIR"
-rm -f "$CASK_PATH.bak"
-
-
+#############################################
 # Git operations
+#############################################
+
 git add "$CASK_PATH"
+
+if git diff --cached --quiet; then
+  echo "No changes detected."
+  exit 0
+fi
+
 git commit -S -m "$APP_NAME: v$LATEST_VERSION"
 git push origin main
 
-echo "Done with $APP_NAME"
+echo "✅ Done with $APP_NAME"
