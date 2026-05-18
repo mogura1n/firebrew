@@ -42,7 +42,7 @@ brew install appname
 
 #### Casks
 ```bash
-brew install --cask navialliance/firebrew/appname
+brew install --cask mogura1n/firebrew/appname
 ```
 or
 ```
