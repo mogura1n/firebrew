@@ -1,7 +1,7 @@
 cask "stacher7" do
   arch arm: "arm64", intel: "x64"
 
-  version "7.0.22"
+  version "7.1.11"
   sha256 :no_check
 
   url "https://s7-releases.stacher-cloud.com/s7-releases/Stacher_Setup_#{version}_#{arch}.dmg"
