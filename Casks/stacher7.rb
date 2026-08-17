@@ -9,6 +9,13 @@ cask "stacher7" do
   desc "GUI front-end for the YT-DLP video downloader"
   homepage "https://stacher.io"
 
+  livecheck do
+    url "https://api.stacher.io/api/update/mac/arm64/latest"
+    strategy :header_match do |headers|
+      headers["location"]&.scan(/Stacher_Setup_(\d+(?:\.\d+)+)_arm64\.dmg/i)&.flatten&.first
+    end
+  end
+
   app "Stacher7.app"
 
   zap trash: [

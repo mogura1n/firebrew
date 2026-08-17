@@ -2,13 +2,14 @@
 set -euo pipefail
 
 CASK_PATH="$1"
-REPO="$2"
-APP_NAME="$3"
-INCLUDE_PRERELEASE="${4:-false}"
-SHA_TYPE="${5:-single}"
+SOURCE_TYPE="$2"
+SOURCE_TARGET="$3"
+APP_NAME="$4"
+INCLUDE_PRERELEASE="${5:-false}"
+SHA_TYPE="${6:-single}"
 
-if [ -z "$CASK_PATH" ] || [ -z "$REPO" ] || [ -z "$APP_NAME" ]; then
-  echo "Usage: $0 CASK_PATH REPO APP_NAME [INCLUDE_PRERELEASE] [SHA_TYPE]"
+if [ -z "$CASK_PATH" ] || [ -z "$SOURCE_TYPE" ] || [ -z "$SOURCE_TARGET" ] || [ -z "$APP_NAME" ]; then
+  echo "Usage: $0 CASK_PATH SOURCE_TYPE SOURCE_TARGET APP_NAME [INCLUDE_PRERELEASE] [SHA_TYPE]"
   exit 1
 fi
 
@@ -47,26 +48,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-#############################################
-# Fetch releases
-#############################################
-
-echo "Fetching releases from $REPO..."
-
-RELEASES_DATA=$(github_api "https://api.github.com/repos/$REPO/releases")
-
-# Ensure GitHub returned an array
-if ! echo "$RELEASES_DATA" | jq -e 'type == "array"' >/dev/null 2>&1; then
-  echo "❌ Invalid GitHub API response"
-  echo "$RELEASES_DATA"
-  exit 1
-fi
-
-#############################################
-# Get latest tag
-#############################################
-
-get_latest_tag() {
+get_latest_github_tag() {
   local json="$1"
   local include_pre="$2"
 
@@ -79,14 +61,69 @@ get_latest_tag() {
   fi
 }
 
-LATEST_TAG=$(get_latest_tag "$RELEASES_DATA" "$INCLUDE_PRERELEASE")
+#############################################
+# Fetch version based on SOURCE_TYPE
+#############################################
 
-if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-  echo "❌ Could not determine latest release tag"
-  exit 1
-fi
+RELEASES_DATA=""
+LATEST_TAG=""
+LATEST_VERSION=""
 
-LATEST_VERSION=$(echo "$LATEST_TAG" | sed -E 's/^(v|release-|build-)//')
+case "$SOURCE_TYPE" in
+  github)
+    echo "Fetching releases from GitHub repo $SOURCE_TARGET..."
+    RELEASES_DATA=$(github_api "https://api.github.com/repos/$SOURCE_TARGET/releases")
+
+    if ! echo "$RELEASES_DATA" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      echo "❌ Invalid GitHub API response"
+      echo "$RELEASES_DATA"
+      exit 1
+    fi
+
+    LATEST_TAG=$(get_latest_github_tag "$RELEASES_DATA" "$INCLUDE_PRERELEASE")
+
+    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+      echo "❌ Could not determine latest release tag"
+      exit 1
+    fi
+
+    LATEST_VERSION=$(echo "$LATEST_TAG" | sed -E 's/^(v|release-|build-)//')
+    ;;
+
+  header_redirect)
+    echo "Fetching redirect headers from $SOURCE_TARGET..."
+    REDIRECT_LOCATION=$(
+      curl -sI "$SOURCE_TARGET" \
+        | grep -i '^location:' \
+        | awk '{print $2}' \
+        | tr -d '\r\n'
+    )
+
+    if [ -z "$REDIRECT_LOCATION" ]; then
+      echo "❌ No Location redirect header found for $SOURCE_TARGET"
+      exit 1
+    fi
+
+    # Extract version numbers (e.g. from /Stacher_Setup_7.1.11_arm64.dmg)
+    LATEST_VERSION=$(
+      echo "$REDIRECT_LOCATION" \
+        | grep -oP '[0-9]+\.[0-9]+(\.[0-9]+)+' \
+        | head -n 1
+    )
+
+    if [ -z "$LATEST_VERSION" ]; then
+      echo "❌ Could not extract version from redirect location: $REDIRECT_LOCATION"
+      exit 1
+    fi
+
+    LATEST_TAG="$LATEST_VERSION"
+    ;;
+
+  *)
+    echo "❌ Unknown SOURCE_TYPE: $SOURCE_TYPE"
+    exit 1
+    ;;
+esac
 
 #############################################
 # Current version check
@@ -98,7 +135,7 @@ CURRENT_VERSION=$(
 )
 
 if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
-  echo "$APP_NAME is already up to date."
+  echo "$APP_NAME is already up to date ($CURRENT_VERSION)."
   exit 0
 fi
 
@@ -126,6 +163,11 @@ IS_NO_CHECK=$(grep -c "sha256 :no_check" "$CASK_PATH" || true)
 if [ "$SHA_TYPE" = "none" ]; then
   echo "Using sha256 :no_check"
 
+  # Remove existing specific sha256 lines if any
+  sed -i.bak '/^\s*sha256\s*"/d' "$CASK_PATH"
+  sed -i.bak '/^\s*sha256\s*arm:/d' "$CASK_PATH"
+  sed -i.bak '/^\s*intel:/d' "$CASK_PATH"
+
   if [ "$IS_NO_CHECK" -eq 0 ]; then
     sed -i.bak -E "/^  version/ a\\
   sha256 :no_check
@@ -135,12 +177,18 @@ if [ "$SHA_TYPE" = "none" ]; then
 else
   # Remove existing sha256 entries
   sed -i.bak '/^\s*sha256 /d' "$CASK_PATH"
+  sed -i.bak '/^\s*intel:/d' "$CASK_PATH"
 
   ###########################################
   # Dual architecture
   ###########################################
 
   if [ "$SHA_TYPE" = "dual" ]; then
+
+    if [ "$SOURCE_TYPE" != "github" ]; then
+      echo "❌ Dual architecture SHA computation currently requires github source or explicit URLs"
+      exit 1
+    fi
 
     ARM_URL=$(
       echo "$RELEASES_DATA" | jq -r \
@@ -194,6 +242,11 @@ else
   ###########################################
 
   elif [ "$SHA_TYPE" = "single" ]; then
+
+    if [ "$SOURCE_TYPE" != "github" ]; then
+      echo "❌ Single asset SHA computation currently requires github source or explicit URLs"
+      exit 1
+    fi
 
     # Prefer macOS tarball if available
     UNIVERSAL_URL=$(
