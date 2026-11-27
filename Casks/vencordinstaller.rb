@@ -1,6 +1,6 @@
 cask "vencordinstaller" do
-  version "1.5.1"
-  sha256 "634a08d878164d1ea2bf4acae1893a95d79a335f7e7eedfa52d99dfdea6215e1"
+  version "1.5.2"
+  sha256 "63c8ecf4df50450778940a66d4636819eb68d31ff1f241fe411a403af1ba191b"
   url "https://github.com/Vencord/Installer/releases/download/v#{version}/VencordInstaller.MacOS.zip"
   name "VencordInstaller"
   desc "A cross platform app for installing Vencord"
